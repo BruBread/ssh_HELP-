@@ -66,6 +66,9 @@ _pa_start_ap() {
     sudo pkill wpa_supplicant 2>/dev/null || true
     sleep 1
 
+    # Take interface away from NetworkManager
+    sudo nmcli device set "$AP_IFACE" managed no 2>/dev/null || true
+
     sudo ip link set "$AP_IFACE" up
     sudo ip addr flush dev "$AP_IFACE"
     sudo ip addr add "$AP_IP/24" dev "$AP_IFACE"
@@ -87,6 +90,8 @@ _pa_stop_ap() {
     sleep 1
     _pa_load_state
     sudo ip addr flush dev "$AP_IFACE" 2>/dev/null || true
+    # Hand interface back to NetworkManager so nmcli can use it
+    sudo nmcli device set "$AP_IFACE" managed yes 2>/dev/null || true
 }
 
 # ─────────────────────────────────────────────────────────────

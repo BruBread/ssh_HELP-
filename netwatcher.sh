@@ -24,6 +24,8 @@ start_ap() {
     pkill wpa_supplicant 2>/dev/null || true
     sleep 1
 
+    nmcli device set "$AP_IFACE" managed no 2>/dev/null || true
+
     ip link set "$AP_IFACE" up
     ip addr flush dev "$AP_IFACE"
     ip addr add "$AP_IP/24" dev "$AP_IFACE"
@@ -64,6 +66,7 @@ try_saved_networks() {
         if echo "$AVAILABLE" | grep -qF "$SSID"; then
             log "Found saved network: ${SSID} — connecting..."
             touch "$CONNECTING_LOCK"
+            nmcli device set wlan0 managed yes 2>/dev/null || true
             if [ -n "$PASS" ]; then
                 nmcli device wifi connect "$SSID" password "$PASS" ifname wlan0 2>/dev/null
             else
