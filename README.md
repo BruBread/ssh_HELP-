@@ -4,7 +4,7 @@
 
 ## How It Works
 
-Once installed, your Pi broadcasts an open Wi-Fi network named after your username (e.g. `pi-john`). Connect your laptop to that network and SSH to `10.0.0.1`. Done forever.
+Once installed, your Pi broadcasts an open Wi-Fi network named after your username (e.g. `pi-john`). Connect your laptop to that network and SSH to `10.0.0.1`. or username@hostname.local.
 
 ```
 Laptop → connects to "pi-john" Wi-Fi → ssh john@10.0.0.1 → you're in
