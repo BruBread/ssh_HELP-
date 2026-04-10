@@ -30,8 +30,11 @@ _pa_warn()    { echo -e "${_BYLW}  ! $1${_NC}"; }
 _pa_err()     { echo -e "${_BRED}  ✗ $1${_NC}"; }
 _pa_need_root() {
     if [ "$EUID" -ne 0 ]; then
-        _pa_err "This command needs sudo. Try: sudo $*"
-        return 1
+        local CMD="$1"; shift
+        # Build quoted args to forward safely
+        local ARGS=""
+        for arg in "$@"; do ARGS="$ARGS $(printf '%q' "$arg")"; done
+        exec sudo bash -c "source $HOME/.piaccess/picommands.sh && $CMD $ARGS"
     fi
 }
 
@@ -99,12 +102,12 @@ pihelp() {
     echo -e "  ${_DIM}────────────────────────────────────${_NC}"
     echo -e "  ${_BYLW}pihelp${_NC}                 Show this help"
     echo -e "  ${_BYLW}pistatus${_NC}                Current mode, IPs, connected clients"
-    echo -e "  ${_BYLW}sudo piap${_NC}               Switch back to AP mode"
-    echo -e "  ${_BYLW}sudo pilock [password]${_NC}  Add a password to the AP"
-    echo -e "  ${_BYLW}sudo piunlock${_NC}            Remove AP password (open network)"
-    echo -e "  ${_BYLW}sudo piwifi${_NC}              Scan and connect to a Wi-Fi network"
-    echo -e "  ${_BYLW}sudo piconnect <ssid> [password]${_NC}   Connect to a specific network"
-    echo -e "  ${_BYLW}sudo piupdate${_NC}            Check for and install SSHit updates"
+    echo -e "  ${_BYLW}piap${_NC}               Switch back to AP mode"
+    echo -e "  ${_BYLW}pilock [password]${_NC}  Add a password to the AP"
+    echo -e "  ${_BYLW}piunlock${_NC}            Remove AP password (open network)"
+    echo -e "  ${_BYLW}piwifi${_NC}              Scan and connect to a Wi-Fi network"
+    echo -e "  ${_BYLW}piconnect <ssid> [password]${_NC}   Connect to a specific network"
+    echo -e "  ${_BYLW}piupdate${_NC}            Check for and install SSHit updates"
     echo -e "  ${_DIM}────────────────────────────────────${_NC}"
     echo -e "  ${_DIM}AP mode:     Pi broadcasts ${_BYLW}${AP_SSID:-pi-USERNAME}${_DIM}, SSH to 10.0.0.1${_NC}"
     echo -e "  ${_DIM}Client mode: Pi joins your network, AP off${_NC}"
@@ -196,7 +199,7 @@ piap() {
 
 # ── pilock ────────────────────────────────────────────────────
 pilock() {
-    _pa_need_root "pilock" || return 1
+    _pa_need_root "pilock" "$@" || return 1
     _pa_load_state
 
     local PASSWORD="$1"
@@ -334,13 +337,13 @@ piwifi() {
 
 # ── piconnect ─────────────────────────────────────────────────
 piconnect() {
-    _pa_need_root "piconnect" || return 1
+    _pa_need_root "piconnect" "$@" || return 1
 
     local SSID="$1"
     local PASS="$2"
 
     if [ -z "$SSID" ]; then
-        _pa_err "Usage: sudo piconnect <ssid> [password]"
+        _pa_err "Usage: piconnect <ssid> [password]"
         return 1
     fi
 
@@ -394,7 +397,7 @@ EOF
             _pa_ok "Connected to: ${_BYLW}${SSID}"
             [ -n "$HOME_IP" ] && echo -e "  IP: ${_BYLW}${HOME_IP}${_NC}"
             echo ""
-            echo -e "  ${_DIM}AP is off. Run ${_BYLW}sudo piap${_DIM} to switch back manually.${_NC}"
+            echo -e "  ${_DIM}AP is off. Run ${_BYLW}piap${_DIM} to switch back manually.${_NC}"
             echo -e "  ${_DIM}Watcher will auto-restore AP if this connection drops.${_NC}"
             echo ""
             return 0
@@ -482,7 +485,7 @@ piupdate() {
     
     read -p "$(echo -e "  ${_BWHT}Install update now? (y/n):${_NC} ")" confirm
     if [ "$confirm" != "y" ]; then
-        _pa_warn "Update skipped. Run 'sudo piupdate' anytime to install."
+        _pa_warn "Update skipped. Run 'piupdate' anytime to install."
         echo ""
         return 0
     fi
@@ -534,7 +537,7 @@ _pa_check_update_notice() {
     echo -e "${_BYLW}  ║     ⚠️  SSHIT UPDATE AVAILABLE  ⚠️         ║${_NC}"
     echo -e "${_BYLW}  ╚════════════════════════════════════════════╝${_NC}"
     echo ""
-    echo -e "  ${_DIM}Run ${_BWHT}sudo piupdate${_DIM} to install the latest version${_NC}"
+    echo -e "  ${_DIM}Run ${_BWHT}piupdate${_DIM} to install the latest version${_NC}"
     echo ""
 }
 
