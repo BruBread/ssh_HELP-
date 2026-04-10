@@ -45,6 +45,7 @@ ssh yourname@raspberrypi.local
 
 Once you're in:
 ```bash
+sudo apt install git
 git clone https://github.com/BruBread/sshit.git
 cd sshit
 sudo bash install.sh
