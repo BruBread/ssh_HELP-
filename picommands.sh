@@ -28,15 +28,10 @@ _pa_info()    { echo -e "${_BCYN}  → $1${_NC}"; }
 _pa_ok()      { echo -e "${_BGRN}  ✓ $1${_NC}"; }
 _pa_warn()    { echo -e "${_BYLW}  ! $1${_NC}"; }
 _pa_err()     { echo -e "${_BRED}  ✗ $1${_NC}"; }
-_pa_need_root() {
-    if [ "$EUID" -ne 0 ]; then
-        local CMD="$1"
-        # Cache sudo credentials upfront so individual sudo calls don't prompt mid-function
-        sudo -v 2>/dev/null || { _pa_err "sudo authentication failed"; return 1; }
-        # Re-call this function as root via sudo, keeping the terminal attached
-        sudo bash -i -c "source $HOME/.piaccess/picommands.sh && $CMD ${@:2}"
-        return $?
-    fi
+
+# Ensure sudo credentials are cached — prompts once if needed
+_pa_sudo() {
+    sudo -v 2>/dev/null || { _pa_err "sudo authentication failed"; return 1; }
 }
 
 _pa_load_state() {
@@ -52,12 +47,11 @@ _pa_load_state() {
 }
 
 _pa_save_mode() {
-    # $1 = "ap" or "client"
     if [ -f "$_PA_STATE" ]; then
         if grep -q "^PA_MODE=" "$_PA_STATE"; then
-            sed -i "s/^PA_MODE=.*/PA_MODE=$1/" "$_PA_STATE"
+            sudo sed -i "s/^PA_MODE=.*/PA_MODE=$1/" "$_PA_STATE"
         else
-            echo "PA_MODE=$1" >> "$_PA_STATE"
+            echo "PA_MODE=$1" | sudo tee -a "$_PA_STATE" > /dev/null
         fi
     fi
 }
@@ -66,19 +60,19 @@ _pa_save_mode() {
 _pa_start_ap() {
     _pa_load_state
 
-    pkill hostapd        2>/dev/null || true
-    pkill dnsmasq        2>/dev/null || true
-    pkill wpa_supplicant 2>/dev/null || true
+    sudo pkill hostapd        2>/dev/null || true
+    sudo pkill dnsmasq        2>/dev/null || true
+    sudo pkill wpa_supplicant 2>/dev/null || true
     sleep 1
 
-    ip link set "$AP_IFACE" up
-    ip addr flush dev "$AP_IFACE"
-    ip addr add "$AP_IP/24" dev "$AP_IFACE"
-    echo 1 > /proc/sys/net/ipv4/ip_forward
+    sudo ip link set "$AP_IFACE" up
+    sudo ip addr flush dev "$AP_IFACE"
+    sudo ip addr add "$AP_IP/24" dev "$AP_IFACE"
+    echo 1 | sudo tee /proc/sys/net/ipv4/ip_forward > /dev/null
 
-    if hostapd "$_PA_HOSTAPD_CONF" -B 2>/dev/null; then
+    if sudo hostapd "$_PA_HOSTAPD_CONF" -B 2>/dev/null; then
         sleep 1
-        dnsmasq --conf-file="$_PA_DNSMASQ_CONF" 2>/dev/null
+        sudo dnsmasq --conf-file="$_PA_DNSMASQ_CONF" 2>/dev/null
         _pa_save_mode "ap"
         return 0
     fi
@@ -87,29 +81,30 @@ _pa_start_ap() {
 
 # ── Internal: tear AP down ────────────────────────────────────
 _pa_stop_ap() {
-    pkill hostapd 2>/dev/null || true
-    pkill dnsmasq 2>/dev/null || true
+    sudo pkill hostapd 2>/dev/null || true
+    sudo pkill dnsmasq 2>/dev/null || true
     sleep 1
     _pa_load_state
-    ip addr flush dev "$AP_IFACE" 2>/dev/null || true
+    sudo ip addr flush dev "$AP_IFACE" 2>/dev/null || true
 }
 
 # ─────────────────────────────────────────────────────────────
 
 # ── pihelp ────────────────────────────────────────────────────
 pihelp() {
+    _pa_load_state
     echo ""
     echo -e "${_BWHT}  PiAccess Commands${_NC}"
     echo -e "  ${_DIM}────────────────────────────────────${_NC}"
-    echo -e "  ${_BYLW}pihelp${_NC}                 Show this help"
-    echo -e "  ${_BYLW}pistatus${_NC}                Current mode, IPs, connected clients"
-    echo -e "  ${_BYLW}piap${_NC}               Switch back to AP mode"
-    echo -e "  ${_BYLW}pilock [password]${_NC}  Add a password to the AP"
-    echo -e "  ${_BYLW}piunlock${_NC}            Remove AP password (open network)"
-    echo -e "  ${_BYLW}piwifi${_NC}              Scan and connect to a Wi-Fi network"
-    echo -e "  ${_BYLW}piconnect <ssid> [password]${_NC}   Connect to a specific network"
-    echo -e "  ${_BYLW}piupdate${_NC}            Check for and install SSHit updates"
-    echo -e "  ${_BYLW}pirestart${_NC}           Reboot the Pi"
+    echo -e "  ${_BYLW}pihelp${_NC}                       Show this help"
+    echo -e "  ${_BYLW}pistatus${_NC}                     Current mode, IPs, connected clients"
+    echo -e "  ${_BYLW}piap${_NC}                         Switch back to AP mode"
+    echo -e "  ${_BYLW}pilock [password]${_NC}            Add a password to the AP"
+    echo -e "  ${_BYLW}piunlock${_NC}                     Remove AP password (open network)"
+    echo -e "  ${_BYLW}piwifi${_NC}                       Scan and connect to a Wi-Fi network"
+    echo -e "  ${_BYLW}piconnect <ssid> [password]${_NC}  Connect to a specific network"
+    echo -e "  ${_BYLW}piupdate${_NC}                     Check for and install SSHit updates"
+    echo -e "  ${_BYLW}pirestart${_NC}                    Reboot the Pi"
     echo -e "  ${_DIM}────────────────────────────────────${_NC}"
     echo -e "  ${_DIM}AP mode:     Pi broadcasts ${_BYLW}${AP_SSID:-pi-USERNAME}${_DIM}, SSH to 10.0.0.1${_NC}"
     echo -e "  ${_DIM}Client mode: Pi joins your network, AP off${_NC}"
@@ -126,7 +121,6 @@ pistatus() {
     echo -e "  ${_DIM}────────────────────────────────────${_NC}"
 
     if pgrep hostapd > /dev/null 2>&1; then
-        # ── AP mode ───────────────────────────────────────────
         echo -e "  Mode:      ${_BGRN}AP${_NC}"
         if [ -z "$AP_PASS" ]; then
             echo -e "  SSID:      ${_BYLW}${AP_SSID}${_NC}  ${_DIM}(open)${_NC}"
@@ -151,7 +145,6 @@ pistatus() {
             echo -e "  Clients:   ${_DIM}none${_NC}"
         fi
     else
-        # ── Client mode ───────────────────────────────────────
         echo -e "  Mode:      ${_BCYN}CLIENT${_NC}"
         CURRENT_SSID=$(iwgetid -r 2>/dev/null)
         if [ -n "$CURRENT_SSID" ]; then
@@ -184,7 +177,7 @@ pistatus() {
 
 # ── piap ──────────────────────────────────────────────────────
 piap() {
-    _pa_need_root "piap" || return 1
+    _pa_sudo || return 1
     _pa_load_state
 
     echo ""
@@ -201,7 +194,7 @@ piap() {
 
 # ── pilock ────────────────────────────────────────────────────
 pilock() {
-    _pa_need_root "pilock" "$@" || return 1
+    _pa_sudo || return 1
     _pa_load_state
 
     local PASSWORD="$1"
@@ -230,7 +223,7 @@ pilock() {
 
     _pa_info "Setting AP password..."
 
-    cat > "$_PA_HOSTAPD_CONF" << EOF
+    sudo tee "$_PA_HOSTAPD_CONF" > /dev/null << EOF
 interface=${AP_IFACE}
 driver=nl80211
 ssid=${AP_SSID}
@@ -247,8 +240,7 @@ wpa_pairwise=TKIP
 rsn_pairwise=CCMP
 EOF
 
-    sed -i "s/^AP_PASS=.*/AP_PASS=${PASSWORD}/" "$_PA_STATE"
-
+    sudo sed -i "s/^AP_PASS=.*/AP_PASS=${PASSWORD}/" "$_PA_STATE"
     piap
     _pa_ok "AP is now password protected"
     echo -e "  Password: ${_BYLW}${PASSWORD}${_NC}"
@@ -257,12 +249,12 @@ EOF
 
 # ── piunlock ──────────────────────────────────────────────────
 piunlock() {
-    _pa_need_root "piunlock" || return 1
+    _pa_sudo || return 1
     _pa_load_state
 
     _pa_info "Removing AP password..."
 
-    cat > "$_PA_HOSTAPD_CONF" << EOF
+    sudo tee "$_PA_HOSTAPD_CONF" > /dev/null << EOF
 interface=${AP_IFACE}
 driver=nl80211
 ssid=${AP_SSID}
@@ -274,8 +266,7 @@ auth_algs=1
 ignore_broadcast_ssid=0
 EOF
 
-    sed -i "s/^AP_PASS=.*/AP_PASS=/" "$_PA_STATE"
-
+    sudo sed -i "s/^AP_PASS=.*/AP_PASS=/" "$_PA_STATE"
     piap
     _pa_ok "AP is now open (no password)"
     echo ""
@@ -283,13 +274,13 @@ EOF
 
 # ── piwifi ────────────────────────────────────────────────────
 piwifi() {
-    _pa_need_root "piwifi" || return 1
+    _pa_sudo || return 1
 
     echo ""
     _pa_info "Turning off AP to scan..."
     _pa_stop_ap
 
-    NETWORKS=$(iwlist wlan0 scan 2>/dev/null | \
+    NETWORKS=$(sudo iwlist wlan0 scan 2>/dev/null | \
         grep 'ESSID:' | \
         sed 's/.*ESSID:"//;s/".*//' | \
         grep -v "^$" | \
@@ -339,7 +330,7 @@ piwifi() {
 
 # ── piconnect ─────────────────────────────────────────────────
 piconnect() {
-    _pa_need_root "piconnect" "$@" || return 1
+    _pa_sudo || return 1
 
     local SSID="$1"
     local PASS="$2"
@@ -349,7 +340,6 @@ piconnect() {
         return 1
     fi
 
-    # If no password was passed as argument, prompt interactively
     if [ -z "$PASS" ]; then
         read -rsp "  Password for '${SSID}' (leave blank if open network): " PASS
         echo ""
@@ -357,22 +347,21 @@ piconnect() {
 
     echo ""
 
-    # Save credentials to state BEFORE touching networking
-    # so netwatcher can reconnect on reboot if needed
+    # Save credentials BEFORE touching networking so reboot is safe
+    _pa_load_state
     if [ -f "$_PA_STATE" ]; then
         if grep -q "^CLIENT_SSID=" "$_PA_STATE"; then
-            sed -i "s/^CLIENT_SSID=.*/CLIENT_SSID=${SSID}/" "$_PA_STATE"
+            sudo sed -i "s/^CLIENT_SSID=.*/CLIENT_SSID=${SSID}/" "$_PA_STATE"
         else
-            echo "CLIENT_SSID=${SSID}" >> "$_PA_STATE"
+            echo "CLIENT_SSID=${SSID}" | sudo tee -a "$_PA_STATE" > /dev/null
         fi
         if grep -q "^CLIENT_PASS=" "$_PA_STATE"; then
-            sed -i "s/^CLIENT_PASS=.*/CLIENT_PASS=${PASS}/" "$_PA_STATE"
+            sudo sed -i "s/^CLIENT_PASS=.*/CLIENT_PASS=${PASS}/" "$_PA_STATE"
         else
-            echo "CLIENT_PASS=${PASS}" >> "$_PA_STATE"
+            echo "CLIENT_PASS=${PASS}" | sudo tee -a "$_PA_STATE" > /dev/null
         fi
     fi
 
-    # Only stop AP if it's currently running
     if pgrep hostapd > /dev/null 2>&1; then
         _pa_info "Turning off AP..."
         _pa_stop_ap
@@ -392,16 +381,16 @@ piconnect() {
 }"
     fi
 
-    cat > /tmp/pa_wpa.conf << EOF
+    sudo tee /tmp/pa_wpa.conf > /dev/null << EOF
 ctrl_interface=DIR=/var/run/wpa_supplicant GROUP=netdev
 update_config=1
 ${WPA_BLOCK}
 EOF
 
-    pkill wpa_supplicant 2>/dev/null || true
+    sudo pkill wpa_supplicant 2>/dev/null || true
     sleep 1
-    wpa_supplicant -B -i wlan0 -c /tmp/pa_wpa.conf 2>/dev/null
-    dhclient wlan0 2>/dev/null &
+    sudo wpa_supplicant -B -i wlan0 -c /tmp/pa_wpa.conf 2>/dev/null
+    sudo dhclient wlan0 2>/dev/null &
 
     _pa_info "Waiting for connection..."
     for i in $(seq 1 20); do
@@ -409,7 +398,6 @@ EOF
         CONNECTED_SSID=$(iwgetid -r 2>/dev/null)
         if [ "$CONNECTED_SSID" = "$SSID" ]; then
             HOME_IP=$(hostname -I 2>/dev/null | tr ' ' '\n' | grep -v "^$" | head -1)
-            # Only save client mode NOW that connection is confirmed
             _pa_save_mode "client"
             echo ""
             _pa_ok "Connected to: ${_BYLW}${SSID}"
@@ -426,7 +414,6 @@ EOF
     echo ""
     _pa_err "Could not connect to '${SSID}'"
     _pa_warn "Check the password and try again. Restarting AP..."
-    # Connection failed — restore AP mode in state so reboot is safe
     _pa_start_ap && _pa_ok "AP is back up: ${_BYLW}${AP_SSID}"
     echo ""
     return 1
@@ -434,24 +421,22 @@ EOF
 
 # ── piupdate ──────────────────────────────────────────────────
 piupdate() {
-    _pa_need_root piupdate || return 1
-    
+    _pa_sudo || return 1
+
     echo ""
     echo -e "${_BCYN}  ╔════════════════════════════════════════════╗${_NC}"
     echo -e "${_BCYN}  ║        CHECKING FOR SSHIT UPDATES          ║${_NC}"
     echo -e "${_BCYN}  ╚════════════════════════════════════════════╝${_NC}"
     echo ""
-    
+
     _REPO_DIR="$_PA_DIR/sshit-repo"
     _BRANCH="main"
-    
-    # Check if git is installed
+
     if ! command -v git &>/dev/null; then
         _pa_err "git not installed. Install with: sudo apt install git"
         return 1
     fi
-    
-    # Clone or update repo
+
     if [ ! -d "$_REPO_DIR" ]; then
         _pa_info "First time check — cloning repository..."
         git clone -q https://github.com/BruBread/sshit.git "$_REPO_DIR" 2>/dev/null
@@ -460,55 +445,45 @@ piupdate() {
             return 1
         fi
     fi
-    
+
     cd "$_REPO_DIR" || return 1
-    
-    # Get current installed version
-    _INSTALLED_VER="unknown"
-    if [ -f "$_PA_DIR/.version" ]; then
-        _INSTALLED_VER=$(cat "$_PA_DIR/.version")
-    fi
-    
-    # Fetch latest
+
     _pa_info "Fetching latest version..."
     git fetch origin "$_BRANCH" --quiet 2>/dev/null
     if [ $? -ne 0 ]; then
         _pa_err "Failed to fetch updates. Check internet connection."
         return 1
     fi
-    
-    # Compare versions
+
     LOCAL_SHA=$(git rev-parse HEAD 2>/dev/null)
     REMOTE_SHA=$(git rev-parse origin/$_BRANCH 2>/dev/null)
-    
+
     echo ""
     echo -e "  ${_DIM}Installed: ${_BYLW}${LOCAL_SHA:0:12}${_NC}"
     echo -e "  ${_DIM}Available: ${_BYLW}${REMOTE_SHA:0:12}${_NC}"
     echo ""
-    
+
     if [ "$LOCAL_SHA" = "$REMOTE_SHA" ]; then
         _pa_ok "You're on the latest version!"
-        rm -f "$_PA_DIR/.update_available" 2>/dev/null
+        sudo rm -f "$_PA_DIR/.update_available" 2>/dev/null
         echo ""
         return 0
     fi
-    
-    # Update available
+
     echo -e "${_BCYN}  ┌────────────────────────────────────────────┐${_NC}"
     echo -e "${_BCYN}  │         🎉 UPDATE AVAILABLE! 🎉            │${_NC}"
     echo -e "${_BCYN}  └────────────────────────────────────────────┘${_NC}"
     echo ""
-    
-    # Mark update as available
-    echo "$REMOTE_SHA" > "$_PA_DIR/.update_available"
-    
-    read -p "$(echo -e "  ${_BWHT}Install update now? (y/n):${_NC} ")" confirm
+
+    echo "$REMOTE_SHA" | sudo tee "$_PA_DIR/.update_available" > /dev/null
+
+    read -rp "$(echo -e "  ${_BWHT}Install update now? (y/n):${_NC} ")" confirm
     if [ "$confirm" != "y" ]; then
         _pa_warn "Update skipped. Run 'piupdate' anytime to install."
         echo ""
         return 0
     fi
-    
+
     echo ""
     _pa_info "Pulling latest version..."
     git pull --ff-only origin "$_BRANCH" --quiet 2>/dev/null
@@ -516,32 +491,29 @@ piupdate() {
         _pa_err "Update failed. Try manually: cd $_REPO_DIR && git pull"
         return 1
     fi
-    
+
     _pa_info "Installing updated files..."
-    
-    # Copy updated files
-    cp "$_REPO_DIR/install.sh" "$_PA_DIR/"
-    cp "$_REPO_DIR/picommands.sh" "$_PA_DIR/"
-    cp "$_REPO_DIR/netwatcher.sh" "$_PA_DIR/"
-    chmod +x "$_PA_DIR"/*.sh
-    
-    # Save version
-    echo "$REMOTE_SHA" > "$_PA_DIR/.version"
-    rm -f "$_PA_DIR/.update_available" 2>/dev/null
-    
+    sudo cp "$_REPO_DIR/install.sh"    "$_PA_DIR/"
+    sudo cp "$_REPO_DIR/picommands.sh" "$_PA_DIR/"
+    sudo cp "$_REPO_DIR/netwatcher.sh" "$_PA_DIR/"
+    sudo chmod +x "$_PA_DIR"/*.sh
+
+    echo "$REMOTE_SHA" | sudo tee "$_PA_DIR/.version" > /dev/null
+    sudo rm -f "$_PA_DIR/.update_available" 2>/dev/null
+
     echo ""
     _pa_ok "Update installed successfully!"
     echo ""
     echo -e "  ${_BYLW}⚠️  Reload your shell:${_NC}  ${_BWHT}source ~/.bashrc${_NC}"
     echo ""
 
-    read -p "$(echo -e "  ${_BWHT}Reboot now to apply changes? (y/n):${_NC} ")" reboot_confirm
+    read -rp "$(echo -e "  ${_BWHT}Reboot now to apply changes? (y/n):${_NC} ")" reboot_confirm
     if [ "$reboot_confirm" = "y" ]; then
         _pa_info "Rebooting..."
         sleep 1
-        reboot
+        sudo reboot
     else
-        _pa_warn "Reboot skipped. Some changes may not take effect until you reboot."
+        _pa_warn "Reboot skipped. Run 'pirestart' anytime."
         echo ""
     fi
 
@@ -550,14 +522,14 @@ piupdate() {
 
 # ── pirestart ─────────────────────────────────────────────────
 pirestart() {
-    _pa_need_root "pirestart" "$@" || return 1
+    _pa_sudo || return 1
 
     echo ""
-    read -p "$(echo -e "  ${_BWHT}Reboot the Pi now? (y/n):${_NC} ")" confirm
+    read -rp "$(echo -e "  ${_BWHT}Reboot the Pi now? (y/n):${_NC} ")" confirm
     if [ "$confirm" = "y" ]; then
         _pa_info "Rebooting..."
         sleep 1
-        reboot
+        sudo reboot
     else
         _pa_warn "Reboot cancelled."
         echo ""
@@ -566,17 +538,15 @@ pirestart() {
 
 # ── Auto-check on login ───────────────────────────────────────
 _pa_check_update_notice() {
-    # Only show once per session
     if [ -n "$_PA_UPDATE_CHECKED" ]; then
         return
     fi
     export _PA_UPDATE_CHECKED=1
-    
-    # Only check if update marker exists
+
     if [ ! -f "$_PA_DIR/.update_available" ]; then
         return
     fi
-    
+
     echo ""
     echo -e "${_BYLW}  ╔════════════════════════════════════════════╗${_NC}"
     echo -e "${_BYLW}  ║     ⚠️  SSHIT UPDATE AVAILABLE  ⚠️         ║${_NC}"
@@ -586,7 +556,6 @@ _pa_check_update_notice() {
     echo ""
 }
 
-# Show update notice on interactive shells only
 if [[ $- == *i* ]]; then
     _pa_check_update_notice
 fi
