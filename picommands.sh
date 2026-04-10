@@ -1,0 +1,404 @@
+#!/bin/bash
+# ============================================================
+#  PiAccess — pi* Commands
+#  Sourced by ~/.bashrc on every shell start.
+#  Do not run directly.
+#
+#  Modes:
+#    AP mode      — wlan0 is a hotspot, SSH via 10.0.0.1
+#    Client mode  — wlan0 connected to home network, AP off
+#                   netwatcher auto-recovers AP if it drops
+# ============================================================
+
+_PA_DIR="$HOME/.piaccess"
+_PA_STATE="$_PA_DIR/ap_state"
+_PA_HOSTAPD_CONF="$_PA_DIR/hostapd.conf"
+_PA_DNSMASQ_CONF="$_PA_DIR/dnsmasq.conf"
+
+# ── Colors ────────────────────────────────────────────────────
+_BGRN='\033[1;32m'
+_BRED='\033[1;31m'
+_BCYN='\033[1;36m'
+_BYLW='\033[1;33m'
+_BWHT='\033[1;37m'
+_DIM='\033[2m'
+_NC='\033[0m'
+
+_pa_info()    { echo -e "${_BCYN}  → $1${_NC}"; }
+_pa_ok()      { echo -e "${_BGRN}  ✓ $1${_NC}"; }
+_pa_warn()    { echo -e "${_BYLW}  ! $1${_NC}"; }
+_pa_err()     { echo -e "${_BRED}  ✗ $1${_NC}"; }
+_pa_need_root() {
+    if [ "$EUID" -ne 0 ]; then
+        _pa_err "This command needs sudo. Try: sudo $*"
+        return 1
+    fi
+}
+
+_pa_load_state() {
+    if [ -f "$_PA_STATE" ]; then
+        source "$_PA_STATE"
+    else
+        AP_SSID="pi-$(whoami)"
+        AP_PASS=""
+        AP_IFACE="wlan0"
+        AP_IP="10.0.0.1"
+        PA_MODE="ap"
+    fi
+}
+
+_pa_save_mode() {
+    # $1 = "ap" or "client"
+    if [ -f "$_PA_STATE" ]; then
+        if grep -q "^PA_MODE=" "$_PA_STATE"; then
+            sed -i "s/^PA_MODE=.*/PA_MODE=$1/" "$_PA_STATE"
+        else
+            echo "PA_MODE=$1" >> "$_PA_STATE"
+        fi
+    fi
+}
+
+# ── Internal: bring AP up ─────────────────────────────────────
+_pa_start_ap() {
+    _pa_load_state
+
+    pkill hostapd        2>/dev/null || true
+    pkill dnsmasq        2>/dev/null || true
+    pkill wpa_supplicant 2>/dev/null || true
+    sleep 1
+
+    ip link set "$AP_IFACE" up
+    ip addr flush dev "$AP_IFACE"
+    ip addr add "$AP_IP/24" dev "$AP_IFACE"
+    echo 1 > /proc/sys/net/ipv4/ip_forward
+
+    if hostapd "$_PA_HOSTAPD_CONF" -B 2>/dev/null; then
+        sleep 1
+        dnsmasq --conf-file="$_PA_DNSMASQ_CONF" 2>/dev/null
+        _pa_save_mode "ap"
+        return 0
+    fi
+    return 1
+}
+
+# ── Internal: tear AP down ────────────────────────────────────
+_pa_stop_ap() {
+    pkill hostapd 2>/dev/null || true
+    pkill dnsmasq 2>/dev/null || true
+    sleep 1
+    _pa_load_state
+    ip addr flush dev "$AP_IFACE" 2>/dev/null || true
+}
+
+# ─────────────────────────────────────────────────────────────
+
+# ── pihelp ────────────────────────────────────────────────────
+pihelp() {
+    echo ""
+    echo -e "${_BWHT}  PiAccess Commands${_NC}"
+    echo -e "  ${_DIM}────────────────────────────────────${_NC}"
+    echo -e "  ${_BYLW}pihelp${_NC}                 Show this help"
+    echo -e "  ${_BYLW}pistatus${_NC}                Current mode, IPs, connected clients"
+    echo -e "  ${_BYLW}sudo piap${_NC}               Switch back to AP mode"
+    echo -e "  ${_BYLW}sudo pilock [password]${_NC}  Add a password to the AP"
+    echo -e "  ${_BYLW}sudo piunlock${_NC}            Remove AP password (open network)"
+    echo -e "  ${_BYLW}sudo piwifi${_NC}              Scan and connect to a Wi-Fi network"
+    echo -e "  ${_BYLW}sudo piconnect <ssid>${_NC}   Connect to a specific network"
+    echo -e "  ${_DIM}────────────────────────────────────${_NC}"
+    echo -e "  ${_DIM}AP mode:     Pi broadcasts ${_BYLW}${AP_SSID:-pi-USERNAME}${_DIM}, SSH to 10.0.0.1${_NC}"
+    echo -e "  ${_DIM}Client mode: Pi joins your network, AP off${_NC}"
+    echo -e "  ${_DIM}             Watcher auto-restores AP if connection drops${_NC}"
+    echo ""
+}
+
+# ── pistatus ──────────────────────────────────────────────────
+pistatus() {
+    _pa_load_state
+
+    echo ""
+    echo -e "${_BWHT}  PiAccess Status${_NC}"
+    echo -e "  ${_DIM}────────────────────────────────────${_NC}"
+
+    if pgrep hostapd > /dev/null 2>&1; then
+        # ── AP mode ───────────────────────────────────────────
+        echo -e "  Mode:      ${_BGRN}AP${_NC}"
+        if [ -z "$AP_PASS" ]; then
+            echo -e "  SSID:      ${_BYLW}${AP_SSID}${_NC}  ${_DIM}(open)${_NC}"
+        else
+            echo -e "  SSID:      ${_BYLW}${AP_SSID}${_NC}  ${_DIM}(password protected)${_NC}"
+        fi
+        echo -e "  SSH via:   ${_BYLW}ssh $(whoami)@${AP_IP}${_NC}"
+        echo ""
+
+        LEASE_FILE="/var/lib/misc/dnsmasq.leases"
+        if [ -f "$LEASE_FILE" ] && [ -s "$LEASE_FILE" ]; then
+            COUNT=$(wc -l < "$LEASE_FILE")
+            echo -e "  Clients:   ${_BYLW}${COUNT}${_NC} connected"
+            while IFS= read -r line; do
+                IP=$(echo   "$line" | awk '{print $3}')
+                HOST=$(echo "$line" | awk '{print $4}')
+                MAC=$(echo  "$line" | awk '{print $2}')
+                [ "$HOST" = "*" ] && HOST="Unknown"
+                echo -e "    ${_BCYN}${IP}${_NC}  ${HOST}  ${_DIM}${MAC}${_NC}"
+            done < "$LEASE_FILE"
+        else
+            echo -e "  Clients:   ${_DIM}none${_NC}"
+        fi
+    else
+        # ── Client mode ───────────────────────────────────────
+        echo -e "  Mode:      ${_BCYN}CLIENT${_NC}"
+        CURRENT_SSID=$(iwgetid -r 2>/dev/null)
+        if [ -n "$CURRENT_SSID" ]; then
+            echo -e "  Network:   ${_BGRN}${CURRENT_SSID}${_NC}"
+            HOME_IP=$(hostname -I 2>/dev/null | tr ' ' '\n' | \
+                      grep -v "^${AP_IP}" | grep -v "^$" | head -1)
+            [ -n "$HOME_IP" ] && echo -e "  IP:        ${_BYLW}${HOME_IP}${_NC}"
+        else
+            echo -e "  Network:   ${_BRED}disconnected${_NC}  ${_DIM}(watcher will restore AP)${_NC}"
+        fi
+    fi
+
+    echo ""
+    if ping -c 1 -W 2 8.8.8.8 > /dev/null 2>&1; then
+        echo -e "  Internet:  ${_BGRN}reachable${_NC}"
+    else
+        echo -e "  Internet:  ${_BRED}not reachable${_NC}"
+    fi
+
+    echo ""
+    if systemctl is-active --quiet pa-netwatcher 2>/dev/null; then
+        echo -e "  Watcher:   ${_BGRN}running${_NC}  ${_DIM}(auto-recovers AP on disconnect)${_NC}"
+    else
+        echo -e "  Watcher:   ${_BRED}stopped${_NC}  ${_DIM}(sudo systemctl start pa-netwatcher)${_NC}"
+    fi
+
+    echo -e "  ${_DIM}────────────────────────────────────${_NC}"
+    echo ""
+}
+
+# ── piap ──────────────────────────────────────────────────────
+piap() {
+    _pa_need_root "piap" || return 1
+    _pa_load_state
+
+    echo ""
+    _pa_info "Switching to AP mode: ${AP_SSID}..."
+
+    if _pa_start_ap; then
+        _pa_ok "AP is live — ${_BYLW}${AP_SSID}${_BGRN} → SSH to ${_BYLW}${AP_IP}"
+    else
+        _pa_err "hostapd failed to start"
+        _pa_warn "Check: sudo journalctl -u hostapd --no-pager -n 20"
+    fi
+    echo ""
+}
+
+# ── pilock ────────────────────────────────────────────────────
+pilock() {
+    _pa_need_root "pilock" || return 1
+    _pa_load_state
+
+    local PASSWORD="$1"
+
+    if [ -z "$PASSWORD" ]; then
+        echo ""
+        echo -e "${_BWHT}  Lock AP with a password${_NC}"
+        read -rsp "  Enter password (8+ chars): " PASSWORD
+        echo ""
+        if [ ${#PASSWORD} -lt 8 ]; then
+            _pa_err "Password must be at least 8 characters"
+            return 1
+        fi
+        read -rsp "  Confirm password: " PASSWORD2
+        echo ""
+        if [ "$PASSWORD" != "$PASSWORD2" ]; then
+            _pa_err "Passwords don't match"
+            return 1
+        fi
+    fi
+
+    if [ ${#PASSWORD} -lt 8 ]; then
+        _pa_err "Password must be at least 8 characters (WPA2 requirement)"
+        return 1
+    fi
+
+    _pa_info "Setting AP password..."
+
+    cat > "$_PA_HOSTAPD_CONF" << EOF
+interface=${AP_IFACE}
+driver=nl80211
+ssid=${AP_SSID}
+hw_mode=g
+channel=6
+wmm_enabled=0
+macaddr_acl=0
+auth_algs=1
+ignore_broadcast_ssid=0
+wpa=2
+wpa_passphrase=${PASSWORD}
+wpa_key_mgmt=WPA-PSK
+wpa_pairwise=TKIP
+rsn_pairwise=CCMP
+EOF
+
+    sed -i "s/^AP_PASS=.*/AP_PASS=${PASSWORD}/" "$_PA_STATE"
+
+    piap
+    _pa_ok "AP is now password protected"
+    echo -e "  Password: ${_BYLW}${PASSWORD}${_NC}"
+    echo ""
+}
+
+# ── piunlock ──────────────────────────────────────────────────
+piunlock() {
+    _pa_need_root "piunlock" || return 1
+    _pa_load_state
+
+    _pa_info "Removing AP password..."
+
+    cat > "$_PA_HOSTAPD_CONF" << EOF
+interface=${AP_IFACE}
+driver=nl80211
+ssid=${AP_SSID}
+hw_mode=g
+channel=6
+wmm_enabled=0
+macaddr_acl=0
+auth_algs=1
+ignore_broadcast_ssid=0
+EOF
+
+    sed -i "s/^AP_PASS=.*/AP_PASS=/" "$_PA_STATE"
+
+    piap
+    _pa_ok "AP is now open (no password)"
+    echo ""
+}
+
+# ── piwifi ────────────────────────────────────────────────────
+piwifi() {
+    _pa_need_root "piwifi" || return 1
+
+    echo ""
+    _pa_info "Turning off AP to scan..."
+    _pa_stop_ap
+
+    NETWORKS=$(iwlist wlan0 scan 2>/dev/null | \
+        grep 'ESSID:' | \
+        sed 's/.*ESSID:"//;s/".*//' | \
+        grep -v "^$" | \
+        sort -u)
+
+    if [ -z "$NETWORKS" ]; then
+        _pa_warn "No networks found — restarting AP"
+        _pa_start_ap
+        return 1
+    fi
+
+    echo ""
+    echo -e "${_BWHT}  Available Networks:${_NC}"
+    echo -e "  ${_DIM}────────────────────────────────────${_NC}"
+
+    i=1
+    declare -A NET_MAP
+    while IFS= read -r ssid; do
+        echo -e "  ${_BYLW}${i})${_NC} ${ssid}"
+        NET_MAP[$i]="$ssid"
+        ((i++))
+    done <<< "$NETWORKS"
+
+    echo -e "  ${_DIM}────────────────────────────────────${_NC}"
+    echo ""
+    read -rp "  Enter number to connect (or q to go back to AP): " CHOICE
+
+    if [ "$CHOICE" = "q" ]; then
+        _pa_info "Restarting AP..."
+        _pa_start_ap && _pa_ok "AP is back up: ${_BYLW}${AP_SSID}"
+        echo ""
+        return 0
+    fi
+
+    CHOSEN_SSID="${NET_MAP[$CHOICE]}"
+    if [ -z "$CHOSEN_SSID" ]; then
+        _pa_err "Invalid choice — restarting AP"
+        _pa_start_ap
+        return 1
+    fi
+
+    read -rsp "  Password for '${CHOSEN_SSID}' (leave blank if open): " WIFI_PASS
+    echo ""
+
+    piconnect "$CHOSEN_SSID" "$WIFI_PASS"
+}
+
+# ── piconnect ─────────────────────────────────────────────────
+piconnect() {
+    _pa_need_root "piconnect" || return 1
+
+    local SSID="$1"
+    local PASS="$2"
+
+    if [ -z "$SSID" ]; then
+        _pa_err "Usage: sudo piconnect <ssid> [password]"
+        return 1
+    fi
+
+    echo ""
+
+    # Only stop AP if it's currently running
+    if pgrep hostapd > /dev/null 2>&1; then
+        _pa_info "Turning off AP..."
+        _pa_stop_ap
+    fi
+
+    _pa_info "Connecting to: ${SSID}..."
+
+    if [ -n "$PASS" ]; then
+        WPA_BLOCK="network={
+    ssid=\"${SSID}\"
+    psk=\"${PASS}\"
+}"
+    else
+        WPA_BLOCK="network={
+    ssid=\"${SSID}\"
+    key_mgmt=NONE
+}"
+    fi
+
+    cat > /tmp/pa_wpa.conf << EOF
+ctrl_interface=DIR=/var/run/wpa_supplicant GROUP=netdev
+update_config=1
+${WPA_BLOCK}
+EOF
+
+    pkill wpa_supplicant 2>/dev/null || true
+    sleep 1
+    wpa_supplicant -B -i wlan0 -c /tmp/pa_wpa.conf 2>/dev/null
+    dhclient wlan0 2>/dev/null &
+
+    _pa_info "Waiting for connection..."
+    for i in $(seq 1 20); do
+        sleep 1
+        CONNECTED_SSID=$(iwgetid -r 2>/dev/null)
+        if [ "$CONNECTED_SSID" = "$SSID" ]; then
+            HOME_IP=$(hostname -I 2>/dev/null | tr ' ' '\n' | grep -v "^$" | head -1)
+            _pa_save_mode "client"
+            echo ""
+            _pa_ok "Connected to: ${_BYLW}${SSID}"
+            [ -n "$HOME_IP" ] && echo -e "  IP: ${_BYLW}${HOME_IP}${_NC}"
+            echo ""
+            echo -e "  ${_DIM}AP is off. Run ${_BYLW}sudo piap${_DIM} to switch back manually.${_NC}"
+            echo -e "  ${_DIM}Watcher will auto-restore AP if this connection drops.${_NC}"
+            echo ""
+            return 0
+        fi
+        printf "."
+    done
+
+    echo ""
+    _pa_err "Could not connect to '${SSID}'"
+    _pa_warn "Check the password and try again. Restarting AP..."
+    _pa_start_ap && _pa_ok "AP is back up: ${_BYLW}${AP_SSID}"
+    echo ""
+    return 1
+}
