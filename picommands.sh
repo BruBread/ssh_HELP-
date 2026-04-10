@@ -104,6 +104,7 @@ pihelp() {
     echo -e "  ${_BYLW}sudo piunlock${_NC}            Remove AP password (open network)"
     echo -e "  ${_BYLW}sudo piwifi${_NC}              Scan and connect to a Wi-Fi network"
     echo -e "  ${_BYLW}sudo piconnect <ssid>${_NC}   Connect to a specific network"
+    echo -e "  ${_BYLW}sudo piupdate${_NC}            Check for and install SSHit updates"
     echo -e "  ${_DIM}────────────────────────────────────${_NC}"
     echo -e "  ${_DIM}AP mode:     Pi broadcasts ${_BYLW}${AP_SSID:-pi-USERNAME}${_DIM}, SSH to 10.0.0.1${_NC}"
     echo -e "  ${_DIM}Client mode: Pi joins your network, AP off${_NC}"
@@ -402,3 +403,136 @@ EOF
     echo ""
     return 1
 }
+
+# ── piupdate ──────────────────────────────────────────────────
+piupdate() {
+    _pa_need_root piupdate || return 1
+    
+    echo ""
+    echo -e "${_BCYN}  ╔════════════════════════════════════════════╗${_NC}"
+    echo -e "${_BCYN}  ║        CHECKING FOR SSHIT UPDATES          ║${_NC}"
+    echo -e "${_BCYN}  ╚════════════════════════════════════════════╝${_NC}"
+    echo ""
+    
+    _REPO_DIR="$_PA_DIR/sshit-repo"
+    _BRANCH="main"
+    
+    # Check if git is installed
+    if ! command -v git &>/dev/null; then
+        _pa_err "git not installed. Install with: sudo apt install git"
+        return 1
+    fi
+    
+    # Clone or update repo
+    if [ ! -d "$_REPO_DIR" ]; then
+        _pa_info "First time check — cloning repository..."
+        git clone -q https://github.com/BruBread/sshit.git "$_REPO_DIR" 2>/dev/null
+        if [ $? -ne 0 ]; then
+            _pa_err "Failed to clone repository. Check internet connection."
+            return 1
+        fi
+    fi
+    
+    cd "$_REPO_DIR" || return 1
+    
+    # Get current installed version
+    _INSTALLED_VER="unknown"
+    if [ -f "$_PA_DIR/.version" ]; then
+        _INSTALLED_VER=$(cat "$_PA_DIR/.version")
+    fi
+    
+    # Fetch latest
+    _pa_info "Fetching latest version..."
+    git fetch origin "$_BRANCH" --quiet 2>/dev/null
+    if [ $? -ne 0 ]; then
+        _pa_err "Failed to fetch updates. Check internet connection."
+        return 1
+    fi
+    
+    # Compare versions
+    LOCAL_SHA=$(git rev-parse HEAD 2>/dev/null)
+    REMOTE_SHA=$(git rev-parse origin/$_BRANCH 2>/dev/null)
+    
+    echo ""
+    echo -e "  ${_DIM}Installed: ${_BYLW}${LOCAL_SHA:0:12}${_NC}"
+    echo -e "  ${_DIM}Available: ${_BYLW}${REMOTE_SHA:0:12}${_NC}"
+    echo ""
+    
+    if [ "$LOCAL_SHA" = "$REMOTE_SHA" ]; then
+        _pa_ok "You're on the latest version!"
+        rm -f "$_PA_DIR/.update_available" 2>/dev/null
+        echo ""
+        return 0
+    fi
+    
+    # Update available
+    echo -e "${_BCYN}  ┌────────────────────────────────────────────┐${_NC}"
+    echo -e "${_BCYN}  │         🎉 UPDATE AVAILABLE! 🎉            │${_NC}"
+    echo -e "${_BCYN}  └────────────────────────────────────────────┘${_NC}"
+    echo ""
+    
+    # Mark update as available
+    echo "$REMOTE_SHA" > "$_PA_DIR/.update_available"
+    
+    read -p "$(echo -e "  ${_BWHT}Install update now? (y/n):${_NC} ")" confirm
+    if [ "$confirm" != "y" ]; then
+        _pa_warn "Update skipped. Run 'sudo piupdate' anytime to install."
+        echo ""
+        return 0
+    fi
+    
+    echo ""
+    _pa_info "Pulling latest version..."
+    git pull --ff-only origin "$_BRANCH" --quiet 2>/dev/null
+    if [ $? -ne 0 ]; then
+        _pa_err "Update failed. Try manually: cd $_REPO_DIR && git pull"
+        return 1
+    fi
+    
+    _pa_info "Installing updated files..."
+    
+    # Copy updated files
+    cp "$_REPO_DIR/install.sh" "$_PA_DIR/"
+    cp "$_REPO_DIR/picommands.sh" "$_PA_DIR/"
+    cp "$_REPO_DIR/netwatcher.sh" "$_PA_DIR/"
+    chmod +x "$_PA_DIR"/*.sh
+    
+    # Save version
+    echo "$REMOTE_SHA" > "$_PA_DIR/.version"
+    rm -f "$_PA_DIR/.update_available" 2>/dev/null
+    
+    echo ""
+    _pa_ok "Update installed successfully!"
+    echo ""
+    echo -e "  ${_BYLW}⚠️  Reload your shell:${_NC}  ${_BWHT}source ~/.bashrc${_NC}"
+    echo ""
+    
+    return 0
+}
+
+# ── Auto-check on login ───────────────────────────────────────
+_pa_check_update_notice() {
+    # Only show once per session
+    if [ -n "$_PA_UPDATE_CHECKED" ]; then
+        return
+    fi
+    export _PA_UPDATE_CHECKED=1
+    
+    # Only check if update marker exists
+    if [ ! -f "$_PA_DIR/.update_available" ]; then
+        return
+    fi
+    
+    echo ""
+    echo -e "${_BYLW}  ╔════════════════════════════════════════════╗${_NC}"
+    echo -e "${_BYLW}  ║     ⚠️  SSHIT UPDATE AVAILABLE  ⚠️         ║${_NC}"
+    echo -e "${_BYLW}  ╚════════════════════════════════════════════╝${_NC}"
+    echo ""
+    echo -e "  ${_DIM}Run ${_BWHT}sudo piupdate${_DIM} to install the latest version${_NC}"
+    echo ""
+}
+
+# Show update notice on interactive shells only
+if [[ $- == *i* ]]; then
+    _pa_check_update_notice
+fi

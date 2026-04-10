@@ -89,6 +89,7 @@ That's it. You never need to find the IP again.
 | `sudo piunlock` | Remove AP password (open network) |
 | `sudo piwifi` | Scan and connect to a Wi-Fi network |
 | `sudo piconnect <ssid> [pw]` | Connect to a specific network |
+| `sudo piupdate` | Check for and install SSHit updates |
 
 ### Examples
 
@@ -105,6 +106,9 @@ sudo piwifi
 
 # Switch back to AP mode manually
 sudo piap
+
+# Check for updates
+sudo piupdate
 ```
 
 ---
