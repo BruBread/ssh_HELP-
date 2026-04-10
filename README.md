@@ -23,9 +23,12 @@ You only need to SSH in the old way once to run the installer. After that, you n
 Download and flash **Raspberry Pi OS Lite (64-bit)** using [Raspberry Pi Imager](https://www.raspberrypi.com/software/).
 
 Click the gear icon ⚙️ before flashing and set:
-- **Hostname:** `raspberrypi`
-- **Username and password** (remember these)
+- **Hostname:** `francispi` (or whatever you want — just keep it the same each time)
+- **Username:** `francis` (or whatever you want — **keep this the same too!**)
+- **Password** (remember this)
 - **Your home Wi-Fi SSID and password**
+
+> **💡 Pro tip:** Use the **same username and hostname** every time you flash a Pi. This way, SSH just works without editing `known_hosts` constantly.
 
 This pre-configures SSH and Wi-Fi so the Pi connects on first boot.
 
@@ -37,9 +40,11 @@ Insert the SD card (or USB drive), power on, wait ~60 seconds.
 
 Try this first:
 ```bash
-ssh yourname@raspberrypi.local
+ssh francis@francispi.local
 ```
-> Works on macOS/Linux. Unreliable on Windows — if it fails, log into your router and find the Pi's IP in the device list, then use `ssh yourname@<ip>`.
+(Replace `francis` and `francispi` with whatever you set in Step 1)
+
+> Works on macOS/Linux. Unreliable on Windows — if it fails, log into your router and find the Pi's IP in the device list, then use `ssh francis@<ip>`.
 
 ### Step 4 — Install SSHit
 
@@ -53,14 +58,21 @@ sudo bash install.sh
 
 The installer will:
 - Install `hostapd` and `dnsmasq`
-- Start a Wi-Fi AP named `pi-<yourusername>`
+- Configure a Wi-Fi AP named `pi-<yourusername>`
 - Add `pi*` commands to your shell
 - Set up auto-start and auto-recovery on every boot
 
+**After the installer finishes, reboot:**
+```bash
+sudo reboot
+```
+
+Wait ~60 seconds for the Pi to come back up.
+
 ### Step 5 — Connect the Easy Way, Forever
 
-1. On your laptop, join Wi-Fi: **`pi-yourusername`** (no password)
-2. SSH in: `ssh yourusername@10.0.0.1`
+1. On your laptop, join Wi-Fi: **`pi-francis`** (no password)
+2. SSH in: `ssh francis@10.0.0.1`
 
 That's it. You never need to find the IP again.
 
@@ -107,6 +119,28 @@ sudo piap
 
 ## Troubleshooting
 
+**"WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!" when connecting**
+
+This is normal if you've reflashed the Pi or reinstalled the OS. The Pi generated new SSH keys, so your computer sees a different fingerprint.
+
+**Fix (pick one):**
+```bash
+# Option 1 - Remove the old key for this hostname
+ssh-keygen -R francispi.local
+
+# Option 2 - Edit ~/.ssh/known_hosts and delete the line for francispi.local
+
+# Option 3 - Remove all saved hosts (nuclear option)
+rm ~/.ssh/known_hosts   # macOS/Linux
+del C:\Users\user\.ssh\known_hosts   # Windows
+```
+
+After doing this, SSH again and type `yes` when asked to confirm the new fingerprint.
+
+> **💡 This is why you should use the same username and hostname every time** — fewer conflicts in `known_hosts`!
+
+---
+
 **AP isn't showing up**
 ```bash
 sudo piap       # restart the AP
@@ -123,7 +157,7 @@ Most common cause: NetworkManager or wpa_supplicant is holding `wlan0`. `piap` h
 
 Make sure you're using `10.0.0.1`, not the hostname:
 ```bash
-ssh yourname@10.0.0.1
+ssh francis@10.0.0.1
 ```
 
 **Pi connected to network but AP didn't come back after disconnect**
