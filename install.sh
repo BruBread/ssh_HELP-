@@ -274,34 +274,13 @@ EOF
 spinner $! "Enabling services..."
 ok "piaccess + pa-netwatcher enabled on boot"
 
-# ── START AP NOW ──────────────────────────────────────────────
-step "Starting AP..."
+# ── FINALIZE ──────────────────────────────────────────────────
+step "Finalizing installation..."
 divider
 
-systemctl stop hostapd 2>/dev/null || true
-systemctl stop dnsmasq 2>/dev/null || true
-pkill hostapd 2>/dev/null || true
-pkill dnsmasq 2>/dev/null || true
-sleep 1
-
-ip link set "$AP_IFACE" up
-ip addr flush dev "$AP_IFACE"
-ip addr add "$AP_IP/24" dev "$AP_IFACE"
-echo 1 > /proc/sys/net/ipv4/ip_forward
-
-(hostapd "$INSTALL_DIR/hostapd.conf" -B 2>/dev/null && \
- sleep 1 && \
- dnsmasq --conf-file="$INSTALL_DIR/dnsmasq.conf" 2>/dev/null) &
-spinner $! "Bringing up ${AP_SSID}..."
-
-if pgrep hostapd > /dev/null 2>&1; then
-    ok "AP is live  →  ${BYLW}${AP_SSID}${NC}"
-else
-    warn "hostapd didn't start — run 'sudo piap' after reboot"
-fi
-
-systemctl start pa-netwatcher 2>/dev/null || true
-ok "Watcher running"
+ok "All configs written"
+ok "Services enabled on boot"
+info "AP will start automatically on next boot"
 
 # ── DONE ──────────────────────────────────────────────────────
 echo ""
@@ -314,9 +293,12 @@ echo '  ██████╔╝╚██████╔╝██║ ╚██�
 echo '  ╚═════╝  ╚═════╝ ╚═╝  ╚═══╝╚══════╝╚═╝'
 echo -e "${NC}"
 divider
-echo -e "  ${BGRN}SSHit is installed and ready!${NC}"
+echo -e "  ${BGRN}SSHit is installed!${NC}"
 echo ""
-echo -e "  ${CYN}Connect to your Pi:${NC}"
+echo -e "  ${BYLW}⚠️  REBOOT REQUIRED${NC}"
+echo -e "  ${DIM}Run:  ${BYLW}sudo reboot${NC}"
+echo ""
+echo -e "  ${DIM}After reboot:${NC}"
 echo -e "  ${DIM}1. Join Wi-Fi:  ${BYLW}${AP_SSID}${DIM}  (no password)${NC}"
 echo -e "  ${DIM}2. SSH in:      ${BYLW}ssh $(whoami)@${AP_IP}${NC}"
 echo ""
