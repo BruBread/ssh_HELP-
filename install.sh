@@ -101,10 +101,14 @@ read -p "$(echo -e "  ${BWHT}Continue? (y/n):${NC} ")" confirm
 [ "$confirm" != "y" ] && echo -e "\n  ${DIM}Aborted.${NC}\n" && exit 0
 
 # ── CONFIG ────────────────────────────────────────────────────
-INSTALL_DIR="$HOME/.piaccess"
+# Get the actual user who ran sudo (not root)
+ACTUAL_USER="${SUDO_USER:-$(whoami)}"
+ACTUAL_HOME=$(eval echo ~$ACTUAL_USER)
+
+INSTALL_DIR="$ACTUAL_HOME/.piaccess"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 AP_IP="10.0.0.1"
-AP_SSID="pi-$(whoami)"
+AP_SSID="pi-${ACTUAL_USER}"
 AP_IFACE="wlan0"
 DHCP_START="10.0.0.10"
 DHCP_END="10.0.0.50"
@@ -142,6 +146,10 @@ ok "Dependencies installed"
 step "Setting up SSHit files..."
 divider
 mkdir -p "$INSTALL_DIR"
+# Fix ownership if installed with sudo
+if [ -n "$SUDO_USER" ]; then
+    chown -R "$SUDO_USER:$SUDO_USER" "$INSTALL_DIR"
+fi
 ok "Created $INSTALL_DIR"
 
 # ── HOSTAPD CONFIG ────────────────────────────────────────────
@@ -239,13 +247,17 @@ else
 fi
 
 # ── BASHRC ────────────────────────────────────────────────────
-BASHRC="$HOME/.bashrc"
+BASHRC="$ACTUAL_HOME/.bashrc"
 BASHRC_LINE="source $INSTALL_DIR/picommands.sh  # sshit"
 if grep -q "sshit" "$BASHRC" 2>/dev/null; then
     warn ".bashrc already configured — skipping"
 else
     echo "" >> "$BASHRC"
     echo "$BASHRC_LINE" >> "$BASHRC"
+    # Fix ownership if installed with sudo
+    if [ -n "$SUDO_USER" ]; then
+        chown "$SUDO_USER:$SUDO_USER" "$BASHRC"
+    fi
     ok "pi* commands added to ~/.bashrc"
 fi
 
@@ -317,7 +329,7 @@ echo -e "  ${DIM}Run:  ${BYLW}sudo reboot${NC}"
 echo ""
 echo -e "  ${DIM}After reboot:${NC}"
 echo -e "  ${DIM}1. Join Wi-Fi:  ${BYLW}${AP_SSID}${DIM}  (no password)${NC}"
-echo -e "  ${DIM}2. SSH in:      ${BYLW}ssh $(whoami)@${AP_IP}${NC}"
+echo -e "  ${DIM}2. SSH in:      ${BYLW}ssh ${ACTUAL_USER}@${AP_IP}${NC}"
 echo ""
 echo -e "  ${CYN}Useful commands:${NC}"
 echo -e "  ${DIM}pihelp        see all commands${NC}"
