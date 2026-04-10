@@ -277,6 +277,16 @@ piwifi() {
     _pa_sudo || return 1
 
     echo ""
+    echo -e "  ${_BYLW}⚠️  WARNING:${_NC} The AP must shut down to scan for networks."
+    echo -e "  ${_DIM}Your SSH session will disconnect briefly. This is normal.${_NC}"
+    echo -e "  ${_DIM}If you cancel or no network is chosen, AP will come back up.${_NC}"
+    echo ""
+    read -rp "$(echo -e "  ${_BWHT}Continue? (y/n):${_NC} ")" proceed
+    if [ "$proceed" != "y" ]; then
+        _pa_warn "Cancelled."
+        echo ""
+        return 0
+    fi
     _pa_info "Turning off AP to scan..."
     _pa_stop_ap
 
@@ -363,7 +373,20 @@ piconnect() {
     fi
 
     if pgrep hostapd > /dev/null 2>&1; then
-        _pa_info "Turning off AP..."
+        echo ""
+        echo -e "  ${_BYLW}⚠️  WARNING:${_NC} The AP must shut down to connect to WiFi."
+        echo -e "  ${_DIM}Your SSH session will disconnect. This is normal.${_NC}"
+        echo -e "  ${_DIM}If connection fails, the AP will restore within 30 seconds.${_NC}"
+        echo -e "  ${_DIM}Reconnect to ${_BYLW}${AP_SSID}${_DIM} and SSH to ${_BYLW}10.0.0.1${_NC}"
+        echo ""
+        read -rp "$(echo -e "  ${_BWHT}Continue? (y/n):${_NC} ")" proceed
+        if [ "$proceed" != "y" ]; then
+            _pa_warn "Cancelled."
+            echo ""
+            return 0
+        fi
+        _pa_info "Turning off AP — you will be disconnected now..."
+        sleep 1
         _pa_stop_ap
     fi
 
@@ -387,16 +410,23 @@ update_config=1
 ${WPA_BLOCK}
 EOF
 
-    sudo pkill wpa_supplicant 2>/dev/null || true
-    sleep 1
+    # Only kill wpa_supplicant if we're switching networks (mirrors safe_connect)
+    CURRENT_SSID=$(iwgetid -r 2>/dev/null)
+    if [ "$CURRENT_SSID" != "$SSID" ]; then
+        sudo pkill wpa_supplicant 2>/dev/null || true
+        sleep 1
+    fi
+
+    sudo ip link set wlan0 up
     sudo wpa_supplicant -B -i wlan0 -c /tmp/pa_wpa.conf 2>/dev/null
-    sudo dhclient wlan0 2>/dev/null &
 
     _pa_info "Waiting for connection..."
-    for i in $(seq 1 20); do
-        sleep 1
+    DEADLINE=$(($(date +%s) + 20))
+    while [ "$(date +%s)" -lt "$DEADLINE" ]; do
+        sleep 0.5
         CONNECTED_SSID=$(iwgetid -r 2>/dev/null)
         if [ "$CONNECTED_SSID" = "$SSID" ]; then
+            sudo dhclient wlan0 2>/dev/null
             HOME_IP=$(hostname -I 2>/dev/null | tr ' ' '\n' | grep -v "^$" | head -1)
             _pa_save_mode "client"
             echo ""
@@ -408,7 +438,6 @@ EOF
             echo ""
             return 0
         fi
-        printf "."
     done
 
     echo ""
