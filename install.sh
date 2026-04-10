@@ -136,8 +136,8 @@ divider
 (apt-get update -qq) &
 spinner $! "Updating package lists..."
 
-(apt-get install -y hostapd dnsmasq -qq > /dev/null 2>&1) &
-spinner $! "Installing hostapd + dnsmasq..."
+(apt-get install -y hostapd dnsmasq network-manager -qq > /dev/null 2>&1) &
+spinner $! "Installing hostapd + dnsmasq + network-manager..."
 
 systemctl unmask hostapd 2>/dev/null || true
 ok "Dependencies installed"
@@ -191,7 +191,26 @@ PA_MODE=ap
 EOF
 ok "State file written"
 
-# ── AP START/STOP SCRIPTS ─────────────────────────────────────
+# ── SAVED NETWORKS ────────────────────────────────────────────
+step "Saved networks (auto-connect)..."
+divider
+echo -e "  ${DIM}Add networks the Pi should auto-connect to when in range.${NC}"
+echo -e "  ${DIM}Leave SSID blank to skip.${NC}"
+echo ""
+
+touch "$INSTALL_DIR/saved_networks"
+while true; do
+    read -p "$(echo -e "  ${BWHT}Network SSID (blank to finish):${NC} ")" _SSID
+    [ -z "$_SSID" ] && break
+    read -rsp "  Password (blank if open): " _PASS
+    echo ""
+    printf '%s\t%s\n' "$_SSID" "$_PASS" >> "$INSTALL_DIR/saved_networks"
+    ok "Saved: ${BYLW}${_SSID}${NC}"
+done
+if [ -n "$SUDO_USER" ]; then
+    chown "$SUDO_USER:$SUDO_USER" "$INSTALL_DIR/saved_networks"
+fi
+echo ""
 cat > "$INSTALL_DIR/ap_start.sh" << EOF
 #!/bin/bash
 source ${INSTALL_DIR}/ap_state
@@ -336,6 +355,7 @@ echo -e "  ${DIM}pihelp        see all commands${NC}"
 echo -e "  ${DIM}pistatus      check AP + connection status${NC}"
 echo -e "  ${DIM}sudo pilock   add a password to the AP${NC}"
 echo -e "  ${DIM}sudo piwifi   connect Pi to your home network${NC}"
+echo -e "  ${DIM}piadd         add a network to auto-connect list${NC}"
 echo ""
 echo -e "  ${DIM}Reload shell:  ${BYLW}source ~/.bashrc${NC}"
 divider

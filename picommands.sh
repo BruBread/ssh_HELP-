@@ -14,6 +14,7 @@ _PA_DIR="$HOME/.piaccess"
 _PA_STATE="$_PA_DIR/ap_state"
 _PA_HOSTAPD_CONF="$_PA_DIR/hostapd.conf"
 _PA_DNSMASQ_CONF="$_PA_DIR/dnsmasq.conf"
+_PA_CONNECTING_LOCK="/tmp/pa_connecting"
 
 # ── Colors ────────────────────────────────────────────────────
 _BGRN='\033[1;32m'
@@ -103,6 +104,8 @@ pihelp() {
     echo -e "  ${_BYLW}piunlock${_NC}                     Remove AP password (open network)"
     echo -e "  ${_BYLW}piwifi${_NC}                       Scan and connect to a Wi-Fi network"
     echo -e "  ${_BYLW}piconnect <ssid> [password]${_NC}  Connect to a specific network"
+    echo -e "  ${_BYLW}pisaved${_NC}                      View and remove saved networks"
+    echo -e "  ${_BYLW}piadd [ssid] [password]${_NC}      Add a network to auto-connect list"
     echo -e "  ${_BYLW}piupdate${_NC}                     Check for and install SSHit updates"
     echo -e "  ${_BYLW}pirestart${_NC}                    Reboot the Pi"
     echo -e "  ${_DIM}────────────────────────────────────${_NC}"
@@ -338,6 +341,80 @@ piwifi() {
     piconnect "$CHOSEN_SSID" "$WIFI_PASS"
 }
 
+# ── Saved networks (JSON-less, stored in ap_state) ────────────
+_pa_save_network() {
+    local SSID="$1"
+    local PASS="$2"
+    local SAVED_FILE="$_PA_DIR/saved_networks"
+    # Format: one per line  SSID<TAB>PASS  (PASS may be empty)
+    sudo touch "$SAVED_FILE"
+    # Remove existing entry for this SSID then append
+    sudo sed -i "/^${SSID}\t/d" "$SAVED_FILE" 2>/dev/null || true
+    printf '%s\t%s\n' "$SSID" "$PASS" | sudo tee -a "$SAVED_FILE" > /dev/null
+}
+
+_pa_try_saved_networks() {
+    local SAVED_FILE="$_PA_DIR/saved_networks"
+    [ -f "$SAVED_FILE" ] || return 1
+
+    _pa_info "Scanning for saved networks..."
+    sudo nmcli device wifi rescan 2>/dev/null
+    sleep 1
+
+    local AVAILABLE
+    AVAILABLE=$(sudo nmcli -t -f SSID device wifi list 2>/dev/null | grep -v '^$')
+
+    while IFS=$'\t' read -r SSID PASS; do
+        [ -z "$SSID" ] && continue
+        if echo "$AVAILABLE" | grep -qF "$SSID"; then
+            _pa_info "Found saved network: ${SSID} — connecting..."
+            _pa_nmcli_connect "$SSID" "$PASS" && return 0
+        fi
+    done < "$SAVED_FILE"
+
+    return 1
+}
+
+# ── Internal: connect via nmcli (like bearbox) ────────────────
+_pa_nmcli_connect() {
+    local SSID="$1"
+    local PASS="$2"
+
+    # Remove stale nmcli profile to avoid conflicts
+    sudo nmcli connection delete "$SSID" 2>/dev/null || true
+
+    if [ -n "$PASS" ]; then
+        sudo nmcli device wifi connect "$SSID" password "$PASS" ifname wlan0 2>/dev/null &
+    else
+        sudo nmcli device wifi connect "$SSID" ifname wlan0 2>/dev/null &
+    fi
+
+    local DEADLINE=$(($(date +%s) + 20))
+    while [ "$(date +%s)" -lt "$DEADLINE" ]; do
+        sleep 0.5
+        local CONNECTED_SSID
+        CONNECTED_SSID=$(iwgetid -r 2>/dev/null)
+        if [ "$CONNECTED_SSID" = "$SSID" ]; then
+            local HOME_IP
+            HOME_IP=$(hostname -I 2>/dev/null | tr ' ' '\n' | grep -v "^$" | head -1)
+            _pa_save_mode "client"
+            _pa_save_network "$SSID" "$PASS"
+            echo ""
+            _pa_ok "Connected to: ${_BYLW}${SSID}"
+            [ -n "$HOME_IP" ] && echo -e "  IP: ${_BYLW}${HOME_IP}${_NC}"
+            echo ""
+            echo -e "  ${_DIM}AP is off. Run ${_BYLW}piap${_DIM} to switch back manually.${_NC}"
+            echo -e "  ${_DIM}Watcher will auto-restore AP if this connection drops.${_NC}"
+            echo ""
+            rm -f "$_PA_CONNECTING_LOCK"
+            return 0
+        fi
+    done
+
+    sudo nmcli device disconnect wlan0 2>/dev/null || true
+    return 1
+}
+
 # ── piconnect ─────────────────────────────────────────────────
 piconnect() {
     _pa_sudo || return 1
@@ -350,6 +427,7 @@ piconnect() {
         return 1
     fi
 
+    # Only prompt for password if not passed as arg and SSID isn't a known open network
     if [ -z "$PASS" ]; then
         read -rsp "  Password for '${SSID}' (leave blank if open network): " PASS
         echo ""
@@ -357,23 +435,9 @@ piconnect() {
 
     echo ""
 
-    # Save credentials BEFORE touching networking so reboot is safe
     _pa_load_state
-    if [ -f "$_PA_STATE" ]; then
-        if grep -q "^CLIENT_SSID=" "$_PA_STATE"; then
-            sudo sed -i "s/^CLIENT_SSID=.*/CLIENT_SSID=${SSID}/" "$_PA_STATE"
-        else
-            echo "CLIENT_SSID=${SSID}" | sudo tee -a "$_PA_STATE" > /dev/null
-        fi
-        if grep -q "^CLIENT_PASS=" "$_PA_STATE"; then
-            sudo sed -i "s/^CLIENT_PASS=.*/CLIENT_PASS=${PASS}/" "$_PA_STATE"
-        else
-            echo "CLIENT_PASS=${PASS}" | sudo tee -a "$_PA_STATE" > /dev/null
-        fi
-    fi
 
     if pgrep hostapd > /dev/null 2>&1; then
-        echo ""
         echo -e "  ${_BYLW}⚠️  WARNING:${_NC} The AP must shut down to connect to WiFi."
         echo -e "  ${_DIM}Your SSH session will disconnect. This is normal.${_NC}"
         echo -e "  ${_DIM}If connection fails, the AP will restore within 30 seconds.${_NC}"
@@ -387,62 +451,20 @@ piconnect() {
         fi
         _pa_info "Turning off AP — you will be disconnected now..."
         sleep 1
+        touch "$_PA_CONNECTING_LOCK"
         _pa_stop_ap
     fi
 
     _pa_info "Connecting to: ${SSID}..."
 
-    if [ -n "$PASS" ]; then
-        WPA_BLOCK="network={
-    ssid=\"${SSID}\"
-    psk=\"${PASS}\"
-}"
-    else
-        WPA_BLOCK="network={
-    ssid=\"${SSID}\"
-    key_mgmt=NONE
-}"
+    if _pa_nmcli_connect "$SSID" "$PASS"; then
+        return 0
     fi
-
-    sudo tee /tmp/pa_wpa.conf > /dev/null << EOF
-ctrl_interface=DIR=/var/run/wpa_supplicant GROUP=netdev
-update_config=1
-${WPA_BLOCK}
-EOF
-
-    # Only kill wpa_supplicant if we're switching networks (mirrors safe_connect)
-    CURRENT_SSID=$(iwgetid -r 2>/dev/null)
-    if [ "$CURRENT_SSID" != "$SSID" ]; then
-        sudo pkill wpa_supplicant 2>/dev/null || true
-        sleep 1
-    fi
-
-    sudo ip link set wlan0 up
-    sudo wpa_supplicant -B -i wlan0 -c /tmp/pa_wpa.conf 2>/dev/null
-
-    _pa_info "Waiting for connection..."
-    DEADLINE=$(($(date +%s) + 20))
-    while [ "$(date +%s)" -lt "$DEADLINE" ]; do
-        sleep 0.5
-        CONNECTED_SSID=$(iwgetid -r 2>/dev/null)
-        if [ "$CONNECTED_SSID" = "$SSID" ]; then
-            sudo dhclient wlan0 2>/dev/null
-            HOME_IP=$(hostname -I 2>/dev/null | tr ' ' '\n' | grep -v "^$" | head -1)
-            _pa_save_mode "client"
-            echo ""
-            _pa_ok "Connected to: ${_BYLW}${SSID}"
-            [ -n "$HOME_IP" ] && echo -e "  IP: ${_BYLW}${HOME_IP}${_NC}"
-            echo ""
-            echo -e "  ${_DIM}AP is off. Run ${_BYLW}piap${_DIM} to switch back manually.${_NC}"
-            echo -e "  ${_DIM}Watcher will auto-restore AP if this connection drops.${_NC}"
-            echo ""
-            return 0
-        fi
-    done
 
     echo ""
     _pa_err "Could not connect to '${SSID}'"
     _pa_warn "Check the password and try again. Restarting AP..."
+    rm -f "$_PA_CONNECTING_LOCK"
     _pa_start_ap && _pa_ok "AP is back up: ${_BYLW}${AP_SSID}"
     echo ""
     return 1
@@ -547,6 +569,88 @@ piupdate() {
     fi
 
     return 0
+}
+
+# ── pisaved ───────────────────────────────────────────────────
+pisaved() {
+    local SAVED_FILE="$_PA_DIR/saved_networks"
+
+    echo ""
+    echo -e "${_BWHT}  Saved Networks${_NC}"
+    echo -e "  ${_DIM}────────────────────────────────────${_NC}"
+
+    if [ ! -f "$SAVED_FILE" ] || [ ! -s "$SAVED_FILE" ]; then
+        echo -e "  ${_DIM}No saved networks.${_NC}"
+        echo ""
+        echo -e "  Use ${_BYLW}piconnect <ssid>${_NC} to connect and save a network."
+        echo ""
+        return 0
+    fi
+
+    local i=1
+    while IFS=$'\t' read -r SSID PASS; do
+        [ -z "$SSID" ] && continue
+        if [ -n "$PASS" ]; then
+            echo -e "  ${_BYLW}${i})${_NC} ${SSID}  ${_DIM}(password saved)${_NC}"
+        else
+            echo -e "  ${_BYLW}${i})${_NC} ${SSID}  ${_DIM}(open network)${_NC}"
+        fi
+        ((i++))
+    done < "$SAVED_FILE"
+
+    echo -e "  ${_DIM}────────────────────────────────────${_NC}"
+    echo ""
+    read -rp "  Enter number to remove (or q to cancel): " CHOICE
+    if [ "$CHOICE" = "q" ] || [ -z "$CHOICE" ]; then
+        echo ""
+        return 0
+    fi
+
+    local j=1
+    while IFS=$'\t' read -r SSID PASS; do
+        [ -z "$SSID" ] && continue
+        if [ "$j" = "$CHOICE" ]; then
+            sudo sed -i "/^${SSID}\t/d" "$SAVED_FILE" 2>/dev/null || true
+            _pa_ok "Removed: ${SSID}"
+            echo ""
+            return 0
+        fi
+        ((j++))
+    done < "$SAVED_FILE"
+
+    _pa_err "Invalid choice."
+    echo ""
+}
+
+# ── piadd ─────────────────────────────────────────────────────
+piadd() {
+    local SSID="$1"
+    local PASS="$2"
+
+    echo ""
+
+    if [ -z "$SSID" ]; then
+        read -rp "  Network name (SSID): " SSID
+        if [ -z "$SSID" ]; then
+            _pa_err "SSID cannot be empty."
+            echo ""
+            return 1
+        fi
+    fi
+
+    if [ -z "$PASS" ]; then
+        read -rsp "  Password (leave blank if open network): " PASS
+        echo ""
+    fi
+
+    _pa_save_network "$SSID" "$PASS"
+    _pa_ok "Saved: ${_BYLW}${SSID}"
+    if [ -z "$PASS" ]; then
+        echo -e "  ${_DIM}(open network)${_NC}"
+    fi
+    echo ""
+    echo -e "  ${_DIM}The Pi will auto-connect to this network when in range.${_NC}"
+    echo ""
 }
 
 # ── pirestart ─────────────────────────────────────────────────
