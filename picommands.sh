@@ -30,11 +30,11 @@ _pa_warn()    { echo -e "${_BYLW}  ! $1${_NC}"; }
 _pa_err()     { echo -e "${_BRED}  ✗ $1${_NC}"; }
 _pa_need_root() {
     if [ "$EUID" -ne 0 ]; then
-        local CMD="$1"; shift
-        # Build quoted args to forward safely
-        local ARGS=""
-        for arg in "$@"; do ARGS="$ARGS $(printf '%q' "$arg")"; done
-        sudo bash -c "source $HOME/.piaccess/picommands.sh && $CMD $ARGS"
+        local CMD="$1"
+        # Cache sudo credentials upfront so individual sudo calls don't prompt mid-function
+        sudo -v 2>/dev/null || { _pa_err "sudo authentication failed"; return 1; }
+        # Re-call this function as root via sudo, keeping the terminal attached
+        sudo bash -i -c "source $HOME/.piaccess/picommands.sh && $CMD ${@:2}" < /dev/tty
         return $?
     fi
 }
