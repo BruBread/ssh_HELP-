@@ -1,95 +1,150 @@
-
 # SSHIT!
+**"Just get an HDMI bro"**
+---
 
-**"Just get an hdmi bro"**
+## How It Works
 
-This allows the Pi to broadcast an AP that YOU can connect and finally SSH into!
+Once installed, your Pi broadcasts an open Wi-Fi network named after your username (e.g. `pi-john`). Connect your laptop to that network and SSH to `10.0.0.1`. Done forever.
 
+```
+Laptop → connects to "pi-john" Wi-Fi → ssh john@10.0.0.1 → you're in
+```
+
+The AP turns off when you connect the Pi to a network via `piwifi` or `piconnect`. If that connection drops, the AP automatically comes back up on its own.
 
 ---
 
-How It Works
-Once installed, your Pi broadcasts an open Wi-Fi network named after your username (e.g. pi-john). Connect your laptop to that network and SSH to 10.0.0.1. The Pi's AP stays on permanently — even after reboots — alongside your normal home Wi-Fi connection.
-Laptop → connects to "pi-john" Wi-Fi → ssh john@10.0.0.1 → you're in
+## First-Time Setup
 
-First-Time Setup (One-Time Steps)
-Before installing PiAccess, you need to SSH in just once the old way. Here's how.
-Step 1 — Flash Pi OS Lite
-Download and flash Raspberry Pi OS Lite (64-bit) using Raspberry Pi Imager.
-In the Imager, click the gear icon ⚙️ and set:
+You only need to SSH in the old way once to run the installer. After that, you never need to again.
 
-Hostname: raspberrypi
-Username and password (remember these)
-Your home Wi-Fi SSID and password
+### Step 1 — Flash Pi OS Lite
 
-This pre-configures SSH and Wi-Fi so you can connect on first boot.
-Step 2 — Boot the Pi
-Insert the SD card, power on the Pi, and wait ~60 seconds.
-Step 3 — Find the Pi on Your Network (One Time Only)
-Try these in order until one works:
-bashssh yourname@raspberrypi.local      # Works on macOS/Linux, unreliable on Windows
-If that fails, log into your router and find the Pi's IP in the device list, then:
-bashssh yourname@<pi-ip-address>
-Step 4 — Install PiAccess
-Once you're SSHed in:
-bashcurl -sSL https://raw.githubusercontent.com/BruBread/piaccess/main/install.sh | sudo bash
-That's it. The installer:
+Download and flash **Raspberry Pi OS Lite (64-bit)** using [Raspberry Pi Imager](https://www.raspberrypi.com/software/).
 
-Installs hostapd and dnsmasq
-Starts a Wi-Fi AP named pi-<yourusername>
-Adds pi* commands to your shell
-Enables the AP to auto-start on every boot
+Click the gear icon ⚙️ before flashing and set:
+- **Hostname:** `raspberrypi`
+- **Username and password** (remember these)
+- **Your home Wi-Fi SSID and password**
 
-Step 5 — Connect the Easy Way, Forever
-From now on, never hunt for an IP again:
+This pre-configures SSH and Wi-Fi so the Pi connects on first boot.
 
-On your laptop, connect to Wi-Fi: pi-yourusername (no password by default)
-SSH in: ssh yourusername@10.0.0.1
+### Step 2 — Boot the Pi
 
+Insert the SD card (or USB drive), power on, wait ~60 seconds.
 
-Commands
-CommandDescriptionpihelpShow all commandspistatusAP status, IP addresses, connected clientspiapRestart the access pointpilock [password]Add a password to the APpiunlockRemove AP password (go back to open)piwifiScan and connect to a Wi-Fi network interactivelypiconnect <ssid> [pw]Connect to a specific Wi-Fi networkpiupdatePull the latest version from GitHub
-Examples
-bash# Check everything at a glance
+### Step 3 — SSH In (One Time Only)
+
+Try this first:
+```bash
+ssh yourname@raspberrypi.local
+```
+> Works on macOS/Linux. Unreliable on Windows — if it fails, log into your router and find the Pi's IP in the device list, then use `ssh yourname@<ip>`.
+
+### Step 4 — Install SSHit
+
+Once you're in:
+```bash
+git clone https://github.com/BruBread/sshit.git
+cd sshit
+sudo bash install.sh
+```
+
+The installer will:
+- Install `hostapd` and `dnsmasq`
+- Start a Wi-Fi AP named `pi-<yourusername>`
+- Add `pi*` commands to your shell
+- Set up auto-start and auto-recovery on every boot
+
+### Step 5 — Connect the Easy Way, Forever
+
+1. On your laptop, join Wi-Fi: **`pi-yourusername`** (no password)
+2. SSH in: `ssh yourusername@10.0.0.1`
+
+That's it. You never need to find the IP again.
+
+---
+
+## Commands
+
+| Command | Description |
+|---|---|
+| `pihelp` | Show all commands |
+| `pistatus` | Current mode, IPs, connected clients |
+| `sudo piap` | Switch back to AP mode |
+| `sudo pilock [password]` | Add a password to the AP |
+| `sudo piunlock` | Remove AP password (open network) |
+| `sudo piwifi` | Scan and connect to a Wi-Fi network |
+| `sudo piconnect <ssid> [pw]` | Connect to a specific network |
+
+### Examples
+
+```bash
+# See what's going on
 pistatus
 
-# Lock the AP with a password
+# Add a password to the AP
 sudo pilock mysecretpass
+# (or just run sudo pilock and it'll prompt you)
 
-# Or just run pilock and it will prompt you
-sudo pilock
+# Connect Pi to your home network
+sudo piwifi
 
-# Connect to a new home Wi-Fi network
-piwifi
+# Switch back to AP mode manually
+sudo piap
+```
 
-# Update PiAccess to the latest version
-piupdate
+---
 
-Supported Hardware
+## Supported Hardware
 
-Raspberry Pi 4 (all RAM variants)
-Pi OS Lite (Bookworm, 64-bit recommended)
+- Raspberry Pi 4 (all RAM variants)
+- Pi OS Lite (Bookworm, 64-bit recommended)
+- Also works booting from USB drive
 
+---
 
-Troubleshooting
-The AP isn't showing up
-bashsudo piap          # restart the AP
-pistatus           # check what's happening
-hostapd fails to start
-bashsudo journalctl -u hostapd --no-pager -n 30
-Most common cause: another process (NetworkManager, wpa_supplicant) is holding wlan0. piap handles this automatically but a reboot fixes persistent issues.
-I can't SSH after connecting to the AP
-Make sure you're SSHing to 10.0.0.1, not the Pi's hostname:
-bashssh yourname@10.0.0.1
-I want to re-run the installer
-The installer is idempotent — safe to run multiple times:
-bashcurl -sSL https://raw.githubusercontent.com/BruBread/piaccess/main/install.sh | sudo bash
+## Troubleshooting
 
-Project Structure
-piaccess/
-├── install.sh        # One-line installer, entry point
-├── picommands.sh     # All pi* bash functions (sourced by .bashrc)
+**AP isn't showing up**
+```bash
+sudo piap       # restart the AP
+pistatus        # check what's going on
+```
+
+**`hostapd` fails to start**
+```bash
+sudo journalctl -u hostapd --no-pager -n 30
+```
+Most common cause: NetworkManager or wpa_supplicant is holding `wlan0`. `piap` handles this automatically, but a reboot fixes stubborn cases.
+
+**Can't SSH after connecting to the AP**
+
+Make sure you're using `10.0.0.1`, not the hostname:
+```bash
+ssh yourname@10.0.0.1
+```
+
+**Pi connected to network but AP didn't come back after disconnect**
+```bash
+sudo piap   # bring it back manually
+# or wait — the watcher checks every 10 seconds and will restore it
+```
+
+---
+
+## Project Structure
+
+```
+sshit/
+├── install.sh        # Installer — run this first
+├── picommands.sh     # All pi* shell commands (sourced by .bashrc)
+├── netwatcher.sh     # Background watcher — restores AP on disconnect
 └── README.md
+```
 
-License
+---
+
+## License
+
 MIT
