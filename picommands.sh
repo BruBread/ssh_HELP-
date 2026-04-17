@@ -85,13 +85,38 @@ _pa_start_ap() {
 
 # ── Internal: tear AP down ────────────────────────────────────
 _pa_stop_ap() {
+    _pa_load_state
+
     sudo pkill hostapd 2>/dev/null || true
     sudo pkill dnsmasq 2>/dev/null || true
-    sleep 1
-    _pa_load_state
+
+    # Wait until hostapd is actually dead (up to 5 seconds)
+    local DEADLINE=$(($(date +%s) + 5))
+    while pgrep hostapd > /dev/null 2>&1; do
+        if [ "$(date +%s)" -ge "$DEADLINE" ]; then
+            _pa_err "hostapd didn't stop — trying SIGKILL"
+            sudo pkill -9 hostapd 2>/dev/null || true
+            sleep 1
+            break
+        fi
+        sleep 0.5
+    done
+
     sudo ip addr flush dev "$AP_IFACE" 2>/dev/null || true
-    # Hand interface back to NetworkManager so nmcli can use it
+
+    # Hand interface back to NetworkManager
     sudo nmcli device set "$AP_IFACE" managed yes 2>/dev/null || true
+
+    # Wait until NetworkManager actually owns the interface (up to 5 seconds)
+    local DEADLINE=$(($(date +%s) + 5))
+    while ! sudo nmcli -t -f DEVICE,STATE device status 2>/dev/null | grep -q "^${AP_IFACE}:"; do
+        if [ "$(date +%s)" -ge "$DEADLINE" ]; then
+            _pa_warn "NetworkManager slow to claim interface — continuing anyway"
+            break
+        fi
+        sleep 0.5
+    done
+    sleep 1  # brief extra settle time
 }
 
 # ─────────────────────────────────────────────────────────────
@@ -283,30 +308,32 @@ EOF
 # ── piwifi ────────────────────────────────────────────────────
 piwifi() {
     _pa_sudo || return 1
+    _pa_load_state
 
     echo ""
-    echo -e "  ${_BYLW}⚠️  WARNING:${_NC} The AP must shut down to scan for networks."
-    echo -e "  ${_DIM}Your SSH session will disconnect briefly. This is normal.${_NC}"
-    echo -e "  ${_DIM}If you cancel or no network is chosen, AP will come back up.${_NC}"
-    echo ""
-    read -rp "$(echo -e "  ${_BWHT}Continue? (y/n):${_NC} ")" proceed
-    if [ "$proceed" != "y" ]; then
-        _pa_warn "Cancelled."
-        echo ""
-        return 0
+    _pa_info "Scanning for networks (AP stays up during scan)..."
+
+    # Scan using a passive nmcli scan — wlan0 can do this while still in AP mode
+    # on most Pi hardware via a secondary scan channel
+    sudo nmcli device wifi rescan 2>/dev/null || true
+    sleep 2
+
+    # Try nmcli scan first; fall back to iwlist if nmcli returns nothing
+    local RAW_NETWORKS
+    RAW_NETWORKS=$(sudo nmcli -t -f SSID device wifi list 2>/dev/null \
+        | grep -v "^$" | grep -v "^--$" | sort -u)
+
+    if [ -z "$RAW_NETWORKS" ]; then
+        _pa_warn "nmcli scan returned nothing — falling back to iwlist..."
+        RAW_NETWORKS=$(sudo iwlist wlan0 scan 2>/dev/null \
+            | grep 'ESSID:' \
+            | sed 's/.*ESSID:"//;s/".*//' \
+            | grep -v "^$" | sort -u)
     fi
-    _pa_info "Turning off AP to scan..."
-    _pa_stop_ap
 
-    NETWORKS=$(sudo iwlist wlan0 scan 2>/dev/null | \
-        grep 'ESSID:' | \
-        sed 's/.*ESSID:"//;s/".*//' | \
-        grep -v "^$" | \
-        sort -u)
-
-    if [ -z "$NETWORKS" ]; then
-        _pa_warn "No networks found — restarting AP"
-        _pa_start_ap
+    if [ -z "$RAW_NETWORKS" ]; then
+        _pa_warn "No networks found. Try again or move closer to your router."
+        echo ""
         return 1
     fi
 
@@ -314,36 +341,66 @@ piwifi() {
     echo -e "${_BWHT}  Available Networks:${_NC}"
     echo -e "  ${_DIM}────────────────────────────────────${_NC}"
 
-    i=1
-    declare -A NET_MAP
+    local NET_LIST=()
+    local i=1
     while IFS= read -r ssid; do
         echo -e "  ${_BYLW}${i})${_NC} ${ssid}"
-        NET_MAP[$i]="$ssid"
-        ((i++))
-    done <<< "$NETWORKS"
+        NET_LIST+=("$ssid")
+        (( i++ ))
+    done <<< "$RAW_NETWORKS"
 
     echo -e "  ${_DIM}────────────────────────────────────${_NC}"
     echo ""
-    read -rp "  Enter number to connect (or q to go back to AP): " CHOICE
+    read -rp "  Enter number to connect (or q to cancel): " CHOICE
 
-    if [ "$CHOICE" = "q" ]; then
-        _pa_info "Restarting AP..."
-        _pa_start_ap && _pa_ok "AP is back up: ${_BYLW}${AP_SSID}"
+    if [ "$CHOICE" = "q" ] || [ -z "$CHOICE" ]; then
+        _pa_warn "Cancelled."
         echo ""
         return 0
     fi
 
-    CHOSEN_SSID="${NET_MAP[$CHOICE]}"
-    if [ -z "$CHOSEN_SSID" ]; then
-        _pa_err "Invalid choice — restarting AP"
-        _pa_start_ap
+    # Validate choice
+    if ! [[ "$CHOICE" =~ ^[0-9]+$ ]] || [ "$CHOICE" -lt 1 ] || [ "$CHOICE" -gt "${#NET_LIST[@]}" ]; then
+        _pa_err "Invalid choice."
+        echo ""
         return 1
     fi
+
+    local CHOSEN_SSID="${NET_LIST[$((CHOICE - 1))]}"
 
     read -rsp "  Password for '${CHOSEN_SSID}' (leave blank if open): " WIFI_PASS
     echo ""
 
-    piconnect "$CHOSEN_SSID" "$WIFI_PASS"
+    # ── Everything chosen — NOW tear down the AP ──────────────
+    echo ""
+    echo -e "  ${_BYLW}⚠️  WARNING:${_NC} The AP will now shut down to connect."
+    echo -e "  ${_DIM}Your SSH session will disconnect. This is normal.${_NC}"
+    echo -e "  ${_DIM}If it fails, the AP restores automatically within ~30s.${_NC}"
+    echo ""
+    read -rp "$(echo -e "  ${_BWHT}Connect to '${CHOSEN_SSID}' now? (y/n):${_NC} ")" proceed
+    if [ "$proceed" != "y" ]; then
+        _pa_warn "Cancelled."
+        echo ""
+        return 0
+    fi
+
+    _pa_info "Shutting down AP..."
+    touch "$_PA_CONNECTING_LOCK"
+    _pa_stop_ap
+
+    _pa_info "Connecting to: ${CHOSEN_SSID}..."
+
+    if _pa_nmcli_connect "$CHOSEN_SSID" "$WIFI_PASS"; then
+        return 0
+    fi
+
+    echo ""
+    _pa_err "Could not connect to '${CHOSEN_SSID}'"
+    _pa_warn "Check the password and try again. Restarting AP..."
+    rm -f "$_PA_CONNECTING_LOCK"
+    _pa_start_ap && _pa_ok "AP is back up: ${_BYLW}${AP_SSID}"
+    echo ""
+    return 1
 }
 
 # ── Saved networks (JSON-less, stored in ap_state) ────────────
@@ -380,7 +437,7 @@ _pa_try_saved_networks() {
     return 1
 }
 
-# ── Internal: connect via nmcli (like bearbox) ────────────────
+# ── Internal: connect via nmcli ───────────────────────────────
 _pa_nmcli_connect() {
     local SSID="$1"
     local PASS="$2"
@@ -388,13 +445,29 @@ _pa_nmcli_connect() {
     # Remove stale nmcli profile to avoid conflicts
     sudo nmcli connection delete "$SSID" 2>/dev/null || true
 
+    # Wait until wlan0 is disconnected/available before handing it nmcli
+    local DEADLINE=$(( $(date +%s) + 8 ))
+    while true; do
+        local STATE
+        STATE=$(sudo nmcli -t -f DEVICE,STATE device status 2>/dev/null \
+                | grep "^wlan0:" | cut -d: -f2)
+        if [ "$STATE" = "disconnected" ] || [ "$STATE" = "available" ]; then
+            break
+        fi
+        if [ "$(date +%s)" -ge "$DEADLINE" ]; then
+            _pa_warn "Interface not ready (state: ${STATE:-unknown}) — attempting anyway"
+            break
+        fi
+        sleep 0.5
+    done
+
     if [ -n "$PASS" ]; then
         sudo nmcli device wifi connect "$SSID" password "$PASS" ifname wlan0 2>/dev/null &
     else
         sudo nmcli device wifi connect "$SSID" ifname wlan0 2>/dev/null &
     fi
 
-    local DEADLINE=$(($(date +%s) + 20))
+    local DEADLINE=$(( $(date +%s) + 20 ))
     while [ "$(date +%s)" -lt "$DEADLINE" ]; do
         sleep 0.5
         local CONNECTED_SSID
@@ -432,29 +505,28 @@ piconnect() {
         return 1
     fi
 
-    # Only prompt for password if not passed as arg and SSID isn't a known open network
+    # Prompt for password up front, before any AP teardown
     if [ -z "$PASS" ]; then
         read -rsp "  Password for '${SSID}' (leave blank if open network): " PASS
         echo ""
     fi
 
     echo ""
-
     _pa_load_state
 
     if pgrep hostapd > /dev/null 2>&1; then
         echo -e "  ${_BYLW}⚠️  WARNING:${_NC} The AP must shut down to connect to WiFi."
         echo -e "  ${_DIM}Your SSH session will disconnect. This is normal.${_NC}"
-        echo -e "  ${_DIM}If connection fails, the AP will restore within 30 seconds.${_NC}"
+        echo -e "  ${_DIM}If connection fails, the AP will restore within ~30 seconds.${_NC}"
         echo -e "  ${_DIM}Reconnect to ${_BYLW}${AP_SSID}${_DIM} and SSH to ${_BYLW}10.0.0.1${_NC}"
         echo ""
-        read -rp "$(echo -e "  ${_BWHT}Continue? (y/n):${_NC} ")" proceed
+        read -rp "$(echo -e "  ${_BWHT}Connect to '${SSID}' now? (y/n):${_NC} ")" proceed
         if [ "$proceed" != "y" ]; then
             _pa_warn "Cancelled."
             echo ""
             return 0
         fi
-        _pa_info "Turning off AP — you will be disconnected now..."
+        _pa_info "Shutting down AP — you will be disconnected now..."
         sleep 1
         touch "$_PA_CONNECTING_LOCK"
         _pa_stop_ap
